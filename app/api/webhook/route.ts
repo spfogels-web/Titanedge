@@ -114,11 +114,44 @@ function actionToSide(action: Action): TradeSide {
   return action === "BUY" ? "LONG" : "SHORT";
 }
 
+// ─── Bot settings (DB-backed) ─────────────────────────────────────────────────
+// Railway Runtime V2 doesn't inject user-defined env vars at runtime.
+// We store secrets in a bot_settings table in Postgres instead.
+// Values are cached per-process so there's only one DB round-trip per cold start.
+const settingsCache: Record<string, string | null> = {};
+
+async function ensureBotSettingsTable(): Promise<void> {
+  await query(`
+    CREATE TABLE IF NOT EXISTS bot_settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `);
+}
+
+async function getSetting(key: string): Promise<string | null> {
+  // 1. Prefer real env var (works if Railway ever fixes Runtime V2)
+  const envVal = process.env[key];
+  if (envVal) return envVal;
+
+  // 2. Return cached value if already loaded
+  if (key in settingsCache) return settingsCache[key];
+
+  // 3. Load from DB (and create table if needed)
+  try {
+    await ensureBotSettingsTable();
+    const res = await query<{ value: string }>(
+      "SELECT value FROM bot_settings WHERE key = $1 LIMIT 1",
+      [key],
+    );
+    settingsCache[key] = res.rows[0]?.value ?? null;
+  } catch {
+    settingsCache[key] = null;
+  }
+  return settingsCache[key];
+}
+
 // ─── TradersPost forwarding ────────────────────────────────────────────────────
-// Awaited (not fire-and-forget) so the fetch completes before we return our
-// response to TradingView. Returns a debug object so the caller can include
-// TradersPost's HTTP status in the JSON response — visible in test curl/PS output.
-// Set TRADERSPOST_WEBHOOK_URL in Railway env vars to enable.
 async function forwardToTradersPost(payload: {
   ticker: string;
   action: "buy" | "sell" | "exit";
@@ -128,7 +161,7 @@ async function forwardToTradersPost(payload: {
   stopPrice?: number | null;
   takeProfit?: number | null;
 }): Promise<{ skipped?: boolean; status?: number; ok?: boolean; body?: string; error?: string }> {
-  const url = process.env.TRADERSPOST_WEBHOOK_URL;
+  const url = await getSetting("TRADERSPOST_WEBHOOK_URL");
   if (!url) return { skipped: true }; // not configured
 
   // Strip null/undefined before sending
