@@ -188,6 +188,7 @@ export async function GET() {
         ? `SET (${process.env.TRADERSPOST_WEBHOOK_URL.length} chars)`
         : "MISSING",
       WEBHOOK_SECRET: process.env.WEBHOOK_SECRET ? "SET" : "MISSING",
+      all_keys: Object.keys(process.env).sort(),
     },
     expectedPayload: {
       action: "BUY | SELL",
