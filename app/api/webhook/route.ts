@@ -285,10 +285,10 @@ export async function POST(req: NextRequest) {
   const account = readStr(body, "account");
   const bot = readStr(body, "bot");
 
-  // Optional absolute stop/target — fall through to tick-offset variants
-  // (stopLossTicks / takeProfitTicks) when absolute prices aren't given.
-  const stopPriceRaw   = readNum(body, "stop_price");
-  const targetPriceRaw = readNum(body, "target_price");
+  // Optional absolute stop/target — accept both snake_case (Pine v2) and
+  // camelCase (legacy Pine / TradersPost style) field names.
+  const stopPriceRaw   = readNum(body, "stop_price")   ?? readNum(body, "stopPrice");
+  const targetPriceRaw = readNum(body, "target_price") ?? readNum(body, "takeProfit");
   const stopLossTicks    = readNum(body, "stopLossTicks");
   const takeProfitTicks  = readNum(body, "takeProfitTicks");
   const trailStartTicks  = readNum(body, "trailStartTicks");
