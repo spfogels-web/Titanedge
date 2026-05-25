@@ -183,6 +183,12 @@ export async function GET() {
   return NextResponse.json({
     ok: true,
     message: "TitanEdge webhook endpoint. POST JSON here from TradingView.",
+    env_check: {
+      TRADERSPOST_WEBHOOK_URL: process.env.TRADERSPOST_WEBHOOK_URL
+        ? `SET (${process.env.TRADERSPOST_WEBHOOK_URL.length} chars)`
+        : "MISSING",
+      WEBHOOK_SECRET: process.env.WEBHOOK_SECRET ? "SET" : "MISSING",
+    },
     expectedPayload: {
       action: "BUY | SELL",
       symbol: "e.g. MNQ1! or MNQM6",
