@@ -1,0 +1,584 @@
+//@version=6
+strategy("⚡ PIVOT MASTER BOT v4 - STRICT ZONES ⚡", overlay=true,
+     default_qty_type=strategy.fixed,
+     default_qty_value=4,
+     initial_capital=50000,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.50,
+     calc_on_every_tick=false,
+     max_lines_count=500,
+     max_labels_count=100,
+     max_bars_back=500)
+
+// ═══════════════════════════════════════════════
+// SETTINGS
+// ═══════════════════════════════════════════════
+pivotTouchTicks = input.int(12,    "Pivot Touch Ticks",    group="Risk")
+atrMultStop     = input.float(1.5, "Stop ATR Multiplier",  group="Risk")
+atrMultTP1      = input.float(1.0, "TP1 ATR (partial)",    group="Risk")
+atrMultTP2      = input.float(2.5, "TP2 ATR (main)",       group="Risk")
+atrPeriod       = input.int(14,    "ATR Period",            group="Risk")
+wickRatio       = input.float(0.50,"Wick Ratio",            group="Risk")
+sessionStart    = input.session("0930-1600", "Day Session (RTH)", group="Risk")
+vixMax          = input.float(30.0,"VIX Max Level",         group="Risk")
+mag7Min         = input.int(4,     "Min Mag 7 Bulls/Bears", group="Risk")
+maxTradesPerDay = input.int(8,     "Max Trades Per Day",    group="Risk")
+
+useVWAP         = input.bool(true, "Use VWAP Filter",       group="Filters")
+useEMA          = input.bool(true, "Use EMA Filter (hidden)", group="Filters")
+useMomentum     = input.bool(true, "Use Momentum Filter",   group="Filters")
+useVolume       = input.bool(true, "Use Volume Filter",     group="Filters")
+useMag7         = input.bool(true, "Use Mag 7 Filter",      group="Filters")
+useVIX          = input.bool(true, "Use VIX Filter",        group="Filters")
+useHTF          = input.bool(true, "Use Higher TF Filter",  group="Filters")
+useCloud        = input.bool(true, "Use Trend Cloud Filter", group="Filters")
+emaFast         = input.int(9,     "Fast EMA (logic only)", group="Filters")
+emaSlow         = input.int(21,    "Slow EMA (logic only)", group="Filters")
+volMultiplier   = input.float(1.0, "Volume Multiplier",     group="Filters")
+htfPeriod       = input.timeframe("60","Higher Timeframe",  group="Filters")
+
+// ROLLING TREND CLOUD
+showCloud       = input.bool(true, "Show Trend Cloud",      group="Trend Cloud")
+cloudFast       = input.int(20,    "Cloud Fast Length",     group="Trend Cloud", minval=2,  maxval=100)
+cloudSlow       = input.int(50,    "Cloud Slow Length",     group="Trend Cloud", minval=10, maxval=200)
+cloudSmooth     = input.int(3,     "Cloud Smoothing",       group="Trend Cloud", minval=1,  maxval=20)
+cloudOpacity    = input.int(75,    "Cloud Opacity (0-100)", group="Trend Cloud", minval=50, maxval=95)
+cloudStyle      = input.string("Hull MA", "Cloud Type", options=["Hull MA","EMA","SMA","WMA"], group="Trend Cloud")
+
+// DYNAMIC TOUCH ZONES — STRICTER DEFAULTS
+useDynamicZones = input.bool(true, "Use Dynamic Touch Zones",  group="Dynamic Zones")
+lookbackBars    = input.int(200,   "Lookback Bars",            group="Dynamic Zones", minval=50,  maxval=500)
+minTouches      = input.int(4,     "Min Touches (was 3)",      group="Dynamic Zones", minval=2,   maxval=10)
+touchZoneTicks  = input.int(8,     "Touch Zone Ticks",         group="Dynamic Zones", minval=2,   maxval=30)
+minBarsBetween  = input.int(8,     "Min Bars Between (was 5)", group="Dynamic Zones", minval=1,   maxval=30)
+zoneMergeTicks  = input.int(10,    "Zone Merge Ticks",         group="Dynamic Zones", minval=2,   maxval=30)
+zoneScanBars    = input.int(50,    "Candidate Levels (recent bars)", group="Dynamic Zones", minval=20, maxval=200)
+zoneRejectBonus = input.int(20,    "Score Bonus at Zone",      group="Dynamic Zones", minval=5,   maxval=40)
+premiumThresh   = input.int(5,     "Premium Zone Touch Threshold", group="Dynamic Zones", minval=3, maxval=15)
+
+// VOLUME PROFILE
+showVP          = input.bool(true, "Show Volume Profile",   group="Volume Profile")
+vpLookback      = input.int(78,    "VP Lookback Bars",      group="Volume Profile", minval=20, maxval=500)
+vpBins          = input.int(40,    "VP Bins",               group="Volume Profile", minval=10, maxval=80)
+vpWidth         = input.int(50,    "VP Display Width",      group="Volume Profile", minval=20, maxval=200)
+valueAreaPct    = input.float(70,  "Value Area %",          group="Volume Profile", minval=50, maxval=90)
+
+// ADAPTIVE
+useAdaptive     = input.bool(true, "Enable Adaptive Threshold", group="Adaptive")
+baseMinScore    = input.int(55,    "Base Min Score",            group="Adaptive")
+adaptLookback   = input.int(20,    "Trades to Track",           group="Adaptive", minval=5, maxval=100)
+
+// BOOKMAP PRESSURE
+showPressure    = input.bool(true, "Show Pressure Lines",   group="Bookmap")
+deltaThreshold  = input.float(1.5, "Pressure Sensitivity",  group="Bookmap", minval=0.5, maxval=5.0, step=0.1)
+lineExtendBars  = input.int(30,    "Line Extension",        group="Bookmap")
+maxPressLines   = input.int(60,    "Max Pressure Lines",    group="Bookmap")
+
+account         = input.string("MFFUbkLiNMNaqc", "Account",   group="Tradovate")
+sym             = input.string("MNQM2026",        "Symbol",    group="Tradovate")
+qty             = input.int(4,                    "Contracts", group="Tradovate")
+
+// COLORS
+candyGreen  = color.new(#00FF41, 0)
+candyRed    = color.new(#FF0A0A, 0)
+grayColor   = color.new(#888888, 0)
+orangeColor = color.new(#FF6600, 0)
+blueColor   = color.new(#0099FF, 0)
+pinkColor   = color.new(#FF00FF, 0)
+cyanColor   = color.new(#00FFFF, 0)
+yellowColor = color.new(#FFFF00, 0)
+zoneGreen   = color.new(#00FF41, 40)
+zoneRed     = color.new(#FF0A0A, 40)
+
+// INDICATORS
+emaFastLine = ta.ema(close, emaFast)
+emaSlowLine = ta.ema(close, emaSlow)
+rsi         = ta.rsi(close, 14)
+atr         = ta.atr(atrPeriod)
+volAvg      = ta.sma(volume, 20)
+vwapLine    = ta.vwap(hlc3)
+
+// ROLLING TREND CLOUD
+f_ma(src, len, maType) =>
+    switch maType
+        "Hull MA" => ta.hma(src, len)
+        "EMA"     => ta.ema(src, len)
+        "SMA"     => ta.sma(src, len)
+        "WMA"     => ta.wma(src, len)
+        =>          ta.hma(src, len)
+
+cloudFastLine = ta.ema(f_ma(close, cloudFast, cloudStyle), cloudSmooth)
+cloudSlowLine = ta.ema(f_ma(close, cloudSlow, cloudStyle), cloudSmooth)
+
+cloudBullish = cloudFastLine > cloudSlowLine
+cloudBearish = cloudFastLine < cloudSlowLine
+
+fastPlot = plot(showCloud ? cloudFastLine : na, "Cloud Fast", color=color.new(cloudBullish ? #00FF41 : #FF0A0A, 30), linewidth=2)
+slowPlot = plot(showCloud ? cloudSlowLine : na, "Cloud Slow", color=color.new(cloudBullish ? #00AA2B : #AA0707, 50), linewidth=2)
+fillCol = cloudBullish ? color.new(#00FF41, cloudOpacity) : color.new(#FF0A0A, cloudOpacity)
+fill(fastPlot, slowPlot, color=fillCol, title="Trend Cloud Fill")
+
+cloudGlowUpper = math.max(cloudFastLine, cloudSlowLine)
+cloudGlowLower = math.min(cloudFastLine, cloudSlowLine)
+glowPlot1 = plot(showCloud ? cloudGlowUpper : na, "Glow Upper", color=color.new(color.black, 100), display=display.none)
+glowPlot2 = plot(showCloud ? cloudGlowLower : na, "Glow Lower", color=color.new(color.black, 100), display=display.none)
+glowCol = cloudBullish ? color.new(#00FF41, math.min(95, cloudOpacity + 10)) : color.new(#FF0A0A, math.min(95, cloudOpacity + 10))
+fill(glowPlot1, glowPlot2, color=glowCol, title="Cloud Glow")
+
+// HTF
+htfEmaFast = request.security(syminfo.tickerid, htfPeriod, ta.ema(close, 9))
+htfEmaSlow = request.security(syminfo.tickerid, htfPeriod, ta.ema(close, 21))
+htfBull = htfEmaFast > htfEmaSlow
+htfBear = htfEmaFast < htfEmaSlow
+
+// VOLUME DELTA
+buyVol  = close >= open ? volume : 0
+sellVol = close < open  ? volume : 0
+delta   = buyVol - sellVol
+deltaAvg = ta.sma(math.abs(delta), 20)
+bigBuy  = delta >  deltaAvg * deltaThreshold
+bigSell = delta < -(deltaAvg * deltaThreshold)
+intensity = deltaAvg > 0 ? math.min(4, math.max(1, math.round(math.abs(delta) / deltaAvg))) : 1
+
+// BOOKMAP PRESSURE LINES
+var array<line> pressLines = array.new<line>()
+if showPressure and (bigBuy or bigSell)
+    priceLevel = hlc3
+    lineCol = bigBuy ? color.new(#00FF41, 60) : color.new(#FF0A0A, 60)
+    newLine = line.new(bar_index, priceLevel, bar_index + lineExtendBars, priceLevel, color=lineCol, width=intensity)
+    array.push(pressLines, newLine)
+    if array.size(pressLines) > maxPressLines
+        line.delete(array.shift(pressLines))
+
+// ═══════════════════════════════════════════════
+// DYNAMIC TOUCH ZONES (STRICTER + PREMIUM TIER)
+// ═══════════════════════════════════════════════
+var array<float> zonePrices   = array.new<float>()
+var array<int>   zoneTouches  = array.new<int>()
+var array<int>   zoneLastBar  = array.new<int>()
+var array<bool>  zoneIsSupp   = array.new<bool>()
+var array<line>  zoneLines    = array.new<line>()
+var array<label> zoneLabels   = array.new<label>()
+
+var bool atSuppZone = false
+var bool atResZone  = false
+var bool atPremiumSupp = false
+var bool atPremiumRes  = false
+var float nearestSuppPrice = na
+var float nearestResPrice  = na
+
+if barstate.islast and useDynamicZones
+    if array.size(zoneLines) > 0
+        for i = 0 to array.size(zoneLines) - 1
+            line.delete(array.get(zoneLines, i))
+    if array.size(zoneLabels) > 0
+        for i = 0 to array.size(zoneLabels) - 1
+            label.delete(array.get(zoneLabels, i))
+    array.clear(zoneLines)
+    array.clear(zoneLabels)
+    array.clear(zonePrices)
+    array.clear(zoneTouches)
+    array.clear(zoneLastBar)
+    array.clear(zoneIsSupp)
+
+    tickSizeLocal = syminfo.mintick
+    zoneTol  = touchZoneTicks * tickSizeLocal
+    mergeTol = zoneMergeTicks * tickSizeLocal
+
+    candidatePrices = array.new<float>()
+    candidateIsHigh = array.new<bool>()
+    candidateBars   = array.new<int>()
+
+    scanLen = math.min(zoneScanBars, bar_index)
+    if scanLen > 4
+        for i = 2 to scanLen - 2
+            if high[i] > high[i+1] and high[i] > high[i+2] and high[i] > high[i-1] and high[i] > high[i-2]
+                array.push(candidatePrices, high[i])
+                array.push(candidateIsHigh, true)
+                array.push(candidateBars, bar_index - i)
+            if low[i] < low[i+1] and low[i] < low[i+2] and low[i] < low[i-1] and low[i] < low[i-2]
+                array.push(candidatePrices, low[i])
+                array.push(candidateIsHigh, false)
+                array.push(candidateBars, bar_index - i)
+
+    lookLen = math.min(lookbackBars, bar_index)
+    if array.size(candidatePrices) > 0 and lookLen > 0
+        for c = 0 to array.size(candidatePrices) - 1
+            candPrice = array.get(candidatePrices, c)
+            touchCount = 0
+            lastTouchBar = -9999
+            for j = 0 to lookLen - 1
+                touched = math.abs(high[j] - candPrice) <= zoneTol or math.abs(low[j] - candPrice) <= zoneTol or math.abs(close[j] - candPrice) <= zoneTol
+                if touched
+                    barNum = bar_index - j
+                    if barNum - lastTouchBar >= minBarsBetween
+                        touchCount += 1
+                        lastTouchBar := barNum
+
+            if touchCount >= minTouches
+                merged = false
+                if array.size(zonePrices) > 0
+                    for z = 0 to array.size(zonePrices) - 1
+                        existingPrice = array.get(zonePrices, z)
+                        if math.abs(existingPrice - candPrice) <= mergeTol
+                            existingTouches = array.get(zoneTouches, z)
+                            newPrice = (existingPrice * existingTouches + candPrice * touchCount) / (existingTouches + touchCount)
+                            array.set(zonePrices,  z, newPrice)
+                            array.set(zoneTouches, z, math.max(existingTouches, touchCount))
+                            array.set(zoneLastBar, z, math.max(array.get(zoneLastBar, z), lastTouchBar))
+                            merged := true
+                            break
+                if not merged
+                    array.push(zonePrices,  candPrice)
+                    array.push(zoneTouches, touchCount)
+                    array.push(zoneLastBar, lastTouchBar)
+                    array.push(zoneIsSupp,  candPrice < close)
+
+    nearestSuppPrice := na
+    nearestResPrice  := na
+    nearestSuppDist  = 1e10
+    nearestResDist   = 1e10
+
+    if array.size(zonePrices) > 0
+        for z = 0 to array.size(zonePrices) - 1
+            zp       = array.get(zonePrices,  z)
+            zt       = array.get(zoneTouches, z)
+            zLastBar = array.get(zoneLastBar, z)
+            isSupp   = zp < close
+            array.set(zoneIsSupp, z, isSupp)
+
+            isPremium = zt >= premiumThresh
+            zCol = isSupp ? (isPremium ? color.new(#00FF41, 10) : zoneGreen) : (isPremium ? color.new(#FF0A0A, 10) : zoneRed)
+            zWidth = isPremium ? 4 : 2
+            ln = line.new(zLastBar - 50, zp, bar_index + 30, zp, color=zCol, width=zWidth, style=line.style_solid, extend=extend.right)
+            array.push(zoneLines, ln)
+
+            tier = isPremium ? "★ STRONG " : ""
+            lblText = tier + (isSupp ? "Support " : "Resistance ") + str.tostring(zt) + "x"
+            lblSize = isPremium ? size.normal : size.small
+            lbl = label.new(bar_index + 30, zp, lblText, color=color.new(color.black, 20), textcolor=isSupp ? candyGreen : candyRed, style=label.style_label_left, size=lblSize)
+            array.push(zoneLabels, lbl)
+
+            dist = math.abs(zp - close)
+            if isSupp and dist < nearestSuppDist
+                nearestSuppDist  := dist
+                nearestSuppPrice := zp
+            if not isSupp and dist < nearestResDist
+                nearestResDist  := dist
+                nearestResPrice := zp
+
+if useDynamicZones and array.size(zonePrices) > 0
+    tickSizeLocal2 = syminfo.mintick
+    nearTol = touchZoneTicks * tickSizeLocal2
+    atSuppZone := false
+    atResZone  := false
+    atPremiumSupp := false
+    atPremiumRes  := false
+    for z = 0 to array.size(zonePrices) - 1
+        zp     = array.get(zonePrices, z)
+        zt     = array.get(zoneTouches, z)
+        isSupp = array.get(zoneIsSupp, z)
+        isPremium = zt >= premiumThresh
+        nearIt = math.abs(low - zp) <= nearTol or math.abs(close - zp) <= nearTol
+        if nearIt
+            if isSupp
+                atSuppZone := true
+                if isPremium
+                    atPremiumSupp := true
+            else
+                atResZone := true
+                if isPremium
+                    atPremiumRes := true
+else
+    atSuppZone := false
+    atResZone  := false
+    atPremiumSupp := false
+    atPremiumRes  := false
+
+// ═══════════════════════════════════════════════
+// VOLUME PROFILE
+// ═══════════════════════════════════════════════
+var array<line> vpLines = array.new<line>()
+var line pocLine = na
+var line vahLine = na
+var line valLine = na
+var float pocPrice = na
+
+if barstate.islast and showVP
+    if array.size(vpLines) > 0
+        for i = 0 to array.size(vpLines) - 1
+            line.delete(array.get(vpLines, i))
+    array.clear(vpLines)
+    line.delete(pocLine)
+    line.delete(vahLine)
+    line.delete(valLine)
+
+    vpHigh = ta.highest(high, vpLookback)
+    vpLow  = ta.lowest(low,  vpLookback)
+    binSize = (vpHigh - vpLow) / vpBins
+
+    if binSize > 0
+        bins = array.new<float>(vpBins, 0.0)
+        for i = 0 to vpLookback - 1
+            barMid = (high[i] + low[i]) / 2
+            idx = math.floor((barMid - vpLow) / binSize)
+            idx := math.max(0, math.min(vpBins - 1, idx))
+            array.set(bins, idx, array.get(bins, idx) + volume[i])
+
+        maxVol = 0.0
+        pocIdx = 0
+        totalVol = 0.0
+        for i = 0 to vpBins - 1
+            v = array.get(bins, i)
+            totalVol += v
+            if v > maxVol
+                maxVol := v
+                pocIdx := i
+
+        targetVol = totalVol * valueAreaPct / 100
+        accumVol = array.get(bins, pocIdx)
+        upIdx = pocIdx
+        dnIdx = pocIdx
+        while accumVol < targetVol and (upIdx < vpBins - 1 or dnIdx > 0)
+            upVol = upIdx < vpBins - 1 ? array.get(bins, upIdx + 1) : 0.0
+            dnVol = dnIdx > 0          ? array.get(bins, dnIdx - 1) : 0.0
+            if upVol >= dnVol and upIdx < vpBins - 1
+                upIdx += 1
+                accumVol += upVol
+            else if dnIdx > 0
+                dnIdx -= 1
+                accumVol += dnVol
+            else
+                break
+
+        pocPrice := vpLow + pocIdx * binSize + binSize / 2
+        vahP = vpLow + upIdx * binSize + binSize / 2
+        valP = vpLow + dnIdx * binSize + binSize / 2
+
+        baseX = bar_index + 5
+        for i = 0 to vpBins - 1
+            v = array.get(bins, i)
+            ratio = maxVol > 0 ? v / maxVol : 0.0
+            barLen = math.round(vpWidth * ratio)
+            priceLvl = vpLow + i * binSize + binSize / 2
+            inVA = i >= dnIdx and i <= upIdx
+            isHVN = ratio >= 0.7
+            col = i == pocIdx ? yellowColor : isHVN ? color.new(cyanColor, 30) : inVA ? color.new(cyanColor, 70) : color.new(grayColor, 75)
+            ln = line.new(baseX, priceLvl, baseX + barLen, priceLvl, color=col, width=2)
+            array.push(vpLines, ln)
+
+        pocLine := line.new(bar_index - vpLookback, pocPrice, bar_index + vpWidth + 10, pocPrice, color=yellowColor, width=2, style=line.style_dashed)
+        vahLine := line.new(bar_index - vpLookback, vahP, bar_index + vpWidth + 10, vahP, color=color.new(cyanColor, 30), width=1, style=line.style_dotted)
+        valLine := line.new(bar_index - vpLookback, valP, bar_index + vpWidth + 10, valP, color=color.new(cyanColor, 30), width=1, style=line.style_dotted)
+
+// MAG 7 / VIX / PIVOTS
+aaplC = request.security("AAPL",  "D", close), aaplP = request.security("AAPL",  "D", close[1])
+msftC = request.security("MSFT",  "D", close), msftP = request.security("MSFT",  "D", close[1])
+nvdaC = request.security("NVDA",  "D", close), nvdaP = request.security("NVDA",  "D", close[1])
+amznC = request.security("AMZN",  "D", close), amznP = request.security("AMZN",  "D", close[1])
+googC = request.security("GOOGL", "D", close), googP = request.security("GOOGL", "D", close[1])
+metaC = request.security("META",  "D", close), metaP = request.security("META",  "D", close[1])
+tslaC = request.security("TSLA",  "D", close), tslaP = request.security("TSLA",  "D", close[1])
+
+mag7Bulls = (aaplC > aaplP ? 1 : 0) + (msftC > msftP ? 1 : 0) + (nvdaC > nvdaP ? 1 : 0) + (amznC > amznP ? 1 : 0) + (googC > googP ? 1 : 0) + (metaC > metaP ? 1 : 0) + (tslaC > tslaP ? 1 : 0)
+mag7Bears = 7 - mag7Bulls
+
+vixC = request.security("VIX", "D", close)
+vixP = request.security("VIX", "D", close[1])
+vixFalling = vixC < vixP
+vixRising  = vixC > vixP
+vixSafe    = vixC < vixMax
+
+prevHigh  = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_on)
+prevLow   = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_on)
+prevClose = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+
+PP = (prevHigh + prevLow + prevClose) / 3
+R1 = (2 * PP) - prevLow
+R2 = PP + (prevHigh - prevLow)
+R3 = prevHigh + 2 * (PP - prevLow)
+S1 = (2 * PP) - prevHigh
+S2 = PP - (prevHigh - prevLow)
+S3 = prevLow  - 2 * (prevHigh - PP)
+
+plot(R3, "R3", color=color.new(#FF0A0A, 60), linewidth=1)
+plot(R2, "R2", color=candyRed,               linewidth=2)
+plot(R1, "R1", color=candyRed,               linewidth=2)
+plot(PP, "PP", color=grayColor,              linewidth=2)
+plot(S1, "S1", color=candyGreen,             linewidth=2)
+plot(S2, "S2", color=candyGreen,             linewidth=2)
+plot(S3, "S3", color=color.new(#00FF41, 60), linewidth=1)
+plot(prevHigh,  "PDH", color=orangeColor,            linewidth=2)
+plot(prevLow,   "PDL", color=blueColor,              linewidth=2)
+plot(prevClose, "PDC", color=color.new(#FFFFFF, 60), linewidth=1)
+plot(vwapLine,  "VWAP", color=pinkColor,    linewidth=2)
+
+// SESSION & DAILY CAP
+inSession = not na(time(timeframe.period, sessionStart, "America/New_York"))
+bgcolor(inSession ? color.new(#0033FF, 96) : na, title="Day Session")
+
+var int tradesToday = 0
+isNewDay = ta.change(time("D")) != 0
+if isNewDay
+    tradesToday := 0
+
+// CANDLE PATTERNS
+range_    = high - low
+lowerWick = math.min(open, close) - low
+upperWick = high - math.max(open, close)
+body      = math.abs(close - open)
+bullHammer = range_ > 0 and (lowerWick / range_ >= wickRatio) and (upperWick < body) and (close > open)
+bearStar   = range_ > 0 and (upperWick / range_ >= wickRatio) and (lowerWick < body) and (close < open)
+bullEngulf = close > open[1] and open < close[1] and close > close[1] and body > body[1]
+bearEngulf = close < open[1] and open > close[1] and close < close[1] and body > body[1]
+bullSignal = bullHammer or bullEngulf
+bearSignal = bearStar   or bearEngulf
+
+// FILTERS
+tickSize  = syminfo.mintick
+touchZone = pivotTouchTicks * tickSize
+nearSupport = math.abs(low - PP) < touchZone or math.abs(low - S1) < touchZone or math.abs(low - S2) < touchZone or math.abs(low - S3) < touchZone or math.abs(low - prevLow) < touchZone
+nearResist  = math.abs(high - PP) < touchZone or math.abs(high - R1) < touchZone or math.abs(high - R2) < touchZone or math.abs(high - R3) < touchZone or math.abs(high - prevHigh) < touchZone
+
+vwapBull = not useVWAP    or close > vwapLine
+vwapBear = not useVWAP    or close < vwapLine
+emaBull  = not useEMA     or (emaFastLine > emaSlowLine)
+emaBear  = not useEMA     or (emaFastLine < emaSlowLine)
+rsiBull  = not useMomentum or (rsi > 40 and rsi < 75)
+rsiBear  = not useMomentum or (rsi < 60 and rsi > 25)
+volBull  = not useVolume  or volume > volAvg * volMultiplier
+volBear  = not useVolume  or volume > volAvg * volMultiplier
+m7Bull   = not useMag7    or mag7Bulls >= mag7Min
+m7Bear   = not useMag7    or mag7Bears >= mag7Min
+vixLong  = not useVIX     or (vixSafe and vixFalling)
+vixShort = not useVIX     or (vixSafe and vixRising)
+htfBullOk = not useHTF    or htfBull
+htfBearOk = not useHTF    or htfBear
+cloudBullOk = not useCloud or cloudBullish
+cloudBearOk = not useCloud or cloudBearish
+
+// SCORE
+premiumBonusLong  = atPremiumSupp and bullSignal ? 10 : 0
+premiumBonusShort = atPremiumRes  and bearSignal ? 10 : 0
+longScore  = (nearSupport ? 20 : 0) + (bullSignal ? 15 : 0) + (vwapBull ? 10 : 0) + (emaBull ? 10 : 0) + (rsiBull ? 10 : 0) + (volBull ? 10 : 0) + (m7Bull ? 15 : 0) + (vixLong ? 10 : 0) + (atSuppZone and bullSignal ? zoneRejectBonus : 0) + premiumBonusLong + (cloudBullOk ? 10 : 0)
+shortScore = (nearResist  ? 20 : 0) + (bearSignal ? 15 : 0) + (vwapBear ? 10 : 0) + (emaBear ? 10 : 0) + (rsiBear ? 10 : 0) + (volBear ? 10 : 0) + (m7Bear ? 15 : 0) + (vixShort ? 10 : 0) + (atResZone  and bearSignal ? zoneRejectBonus : 0) + premiumBonusShort + (cloudBearOk ? 10 : 0)
+
+// ADAPTIVE THRESHOLD
+var array<float> tradeResults = array.new<float>()
+if strategy.closedtrades > nz(strategy.closedtrades[1])
+    lastTradeProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    array.push(tradeResults, lastTradeProfit)
+    if array.size(tradeResults) > adaptLookback
+        array.shift(tradeResults)
+
+wins = 0
+totalPnL = 0.0
+nTrades = array.size(tradeResults)
+if nTrades > 0
+    for i = 0 to nTrades - 1
+        r = array.get(tradeResults, i)
+        if r > 0
+            wins += 1
+        totalPnL += r
+
+winRate = nTrades > 0 ? wins / nTrades * 100 : 50.0
+
+effectiveMinScore = baseMinScore
+if useAdaptive and nTrades >= 5
+    if winRate >= 65
+        effectiveMinScore := math.max(45, baseMinScore - 10)
+    else if winRate >= 55
+        effectiveMinScore := math.max(50, baseMinScore - 5)
+    else if winRate < 35
+        effectiveMinScore := math.min(85, baseMinScore + 15)
+    else if winRate < 45
+        effectiveMinScore := math.min(80, baseMinScore + 10)
+
+// ═══════════════════════════════════════════════
+// ENTRIES — bracket orders baked into alert_message
+// Stop + TP2 sent so TradersPost sets bracket at Tradovate.
+// TP1 (partial) is managed by strategy.exit() on TradingView side.
+// ═══════════════════════════════════════════════
+canTrade = inSession and tradesToday < maxTradesPerDay and strategy.position_size == 0
+
+zoneLongEntry  = canTrade and useDynamicZones and atSuppZone and bullSignal and vixLong and m7Bull and htfBullOk and cloudBullOk
+zoneShortEntry = canTrade and useDynamicZones and atResZone  and bearSignal and vixShort and m7Bear and htfBearOk and cloudBearOk
+
+stdLongEntry   = canTrade and longScore  >= effectiveMinScore
+stdShortEntry  = canTrade and shortScore >= effectiveMinScore
+
+longCond  = zoneLongEntry  or stdLongEntry
+shortCond = zoneShortEntry or stdShortEntry
+
+longStop  = close - (atr * atrMultStop)
+longTP1   = close + (atr * atrMultTP1)
+longTP2   = close + (atr * atrMultTP2)
+shortStop = close + (atr * atrMultStop)
+shortTP1  = close - (atr * atrMultTP1)
+shortTP2  = close - (atr * atrMultTP2)
+halfQty   = math.max(1, math.floor(qty / 2))
+
+if longCond
+    // ── CORRECTED: stopPrice + takeProfit included so TradersPost
+    //    creates bracket orders at Tradovate on entry. ──────────────
+    longAlertMsg = '{"action":"BUY","symbol":"' + sym + '","qty":' + str.tostring(qty) + ',"orderType":"Market","account":"' + account + '","stopPrice":' + str.tostring(longStop, "#.##") + ',"takeProfit":' + str.tostring(longTP2, "#.##") + ',"score":' + str.tostring(longScore) + ',"strategy":"Pivot Master v4 Strict"}'
+    strategy.entry("Long", strategy.long, qty=qty, alert_message=longAlertMsg)
+    strategy.exit("L TP1", "Long", qty=halfQty, limit=longTP1, stop=longStop)
+    strategy.exit("L TP2", "Long", limit=longTP2, stop=longStop)
+    tradesToday += 1
+
+if shortCond
+    // ── CORRECTED: stopPrice + takeProfit included so TradersPost
+    //    creates bracket orders at Tradovate on entry. ──────────────
+    shortAlertMsg = '{"action":"SELL","symbol":"' + sym + '","qty":' + str.tostring(qty) + ',"orderType":"Market","account":"' + account + '","stopPrice":' + str.tostring(shortStop, "#.##") + ',"takeProfit":' + str.tostring(shortTP2, "#.##") + ',"score":' + str.tostring(shortScore) + ',"strategy":"Pivot Master v4 Strict"}'
+    strategy.entry("Short", strategy.short, qty=qty, alert_message=shortAlertMsg)
+    strategy.exit("S TP1", "Short", qty=halfQty, limit=shortTP1, stop=shortStop)
+    strategy.exit("S TP2", "Short", limit=shortTP2, stop=shortStop)
+    tradesToday += 1
+
+plotshape(longCond,  title="Long Entry",  style=shape.triangleup,   location=location.belowbar, color=candyGreen, size=size.small)
+plotshape(shortCond, title="Short Entry", style=shape.triangledown, location=location.abovebar, color=candyRed,   size=size.small)
+plotshape(zoneLongEntry,  title="Zone Long",  style=shape.diamond, location=location.belowbar, color=yellowColor, size=size.small)
+plotshape(zoneShortEntry, title="Zone Short", style=shape.diamond, location=location.abovebar, color=yellowColor, size=size.small)
+plotshape(atPremiumSupp and bullSignal, title="PREMIUM Zone Long",  style=shape.diamond, location=location.belowbar, color=color.new(#FFFF00, 0), size=size.normal)
+plotshape(atPremiumRes  and bearSignal, title="PREMIUM Zone Short", style=shape.diamond, location=location.abovebar, color=color.new(#FFFF00, 0), size=size.normal)
+
+// STATUS TABLE
+var table statusTbl = table.new(position.top_right, 2, 13, bgcolor=color.new(color.black, 70), border_width=1, border_color=color.new(color.gray, 50))
+if barstate.islast
+    wrColor = winRate >= 55 ? candyGreen : winRate >= 45 ? yellowColor : candyRed
+    pnlColor = totalPnL >= 0 ? candyGreen : candyRed
+    cloudCol = cloudBullish ? candyGreen : candyRed
+    cloudTxt = cloudBullish ? "▲ BULL" : "▼ BEAR"
+    table.cell(statusTbl, 0, 0, "PIVOT BOT v4",      text_color=yellowColor,  bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(statusTbl, 1, 0, "STRICT",            text_color=cyanColor,    bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(statusTbl, 0, 1, "Trend Cloud",       text_color=color.white,  text_size=size.small)
+    table.cell(statusTbl, 1, 1, cloudTxt,            text_color=cloudCol,     text_size=size.small)
+    table.cell(statusTbl, 0, 2, "Win Rate",          text_color=color.white,  text_size=size.small)
+    table.cell(statusTbl, 1, 2, str.tostring(winRate, "#.#") + "%", text_color=wrColor, text_size=size.small)
+    table.cell(statusTbl, 0, 3, "Threshold",         text_color=color.white,  text_size=size.small)
+    table.cell(statusTbl, 1, 3, str.tostring(effectiveMinScore) + (effectiveMinScore < baseMinScore ? " ▼" : effectiveMinScore > baseMinScore ? " ▲" : " ="), text_color=cyanColor, text_size=size.small)
+    table.cell(statusTbl, 0, 4, "Trades Today",      text_color=color.white,  text_size=size.small)
+    table.cell(statusTbl, 1, 4, str.tostring(tradesToday) + "/" + str.tostring(maxTradesPerDay), text_color=tradesToday >= maxTradesPerDay ? candyRed : color.white, text_size=size.small)
+    table.cell(statusTbl, 0, 5, "Total P&L",         text_color=color.white,  text_size=size.small)
+    table.cell(statusTbl, 1, 5, "$" + str.tostring(totalPnL, "#.##"), text_color=pnlColor, text_size=size.small)
+    table.cell(statusTbl, 0, 6, "POC",               text_color=color.white,  text_size=size.small)
+    table.cell(statusTbl, 1, 6, na(pocPrice) ? "—" : str.tostring(pocPrice, "#.##"), text_color=yellowColor, text_size=size.small)
+    table.cell(statusTbl, 0, 7, "Zones Found",       text_color=color.white,  text_size=size.small)
+    table.cell(statusTbl, 1, 7, str.tostring(array.size(zonePrices)), text_color=cyanColor, text_size=size.small)
+    table.cell(statusTbl, 0, 8, "Nearest Supp",      text_color=color.white,  text_size=size.small)
+    table.cell(statusTbl, 1, 8, na(nearestSuppPrice) ? "—" : str.tostring(nearestSuppPrice, "#.##"), text_color=candyGreen, text_size=size.small)
+    table.cell(statusTbl, 0, 9, "Nearest Res",       text_color=color.white,  text_size=size.small)
+    table.cell(statusTbl, 1, 9, na(nearestResPrice)  ? "—" : str.tostring(nearestResPrice,  "#.##"), text_color=candyRed, text_size=size.small)
+    table.cell(statusTbl, 0, 10,"Long / Short",      text_color=color.white,  text_size=size.small)
+    table.cell(statusTbl, 1, 10,str.tostring(longScore) + " / " + str.tostring(shortScore), text_color=cyanColor, text_size=size.small)
+    table.cell(statusTbl, 0, 11,"At Zone",           text_color=color.white,  text_size=size.small)
+    zoneStateTxt = atPremiumSupp ? "★ PREMIUM SUPP" : atPremiumRes ? "★ PREMIUM RES" : atSuppZone ? "support" : atResZone ? "resistance" : "no"
+    zoneStateCol = atPremiumSupp ? yellowColor : atPremiumRes ? yellowColor : atSuppZone ? candyGreen : atResZone ? candyRed : grayColor
+    table.cell(statusTbl, 1, 11,zoneStateTxt, text_color=zoneStateCol, text_size=size.small)
+    table.cell(statusTbl, 0, 12,"Premium Threshold", text_color=color.white,  text_size=size.small)
+    table.cell(statusTbl, 1, 12,str.tostring(premiumThresh) + "+ touches", text_color=yellowColor, text_size=size.small)
+
+// ── alertcondition kept for manual alert setup fallback ──────────────────────
+alertcondition(longCond,  "LONG Signal",  '{"action":"BUY","symbol":"MNQM2026","qty":4,"orderType":"Market","account":"MFFUbkLiNMNaqc"}')
+alertcondition(shortCond, "SHORT Signal", '{"action":"SELL","symbol":"MNQM2026","qty":4,"orderType":"Market","account":"MFFUbkLiNMNaqc"}')
