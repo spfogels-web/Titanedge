@@ -297,6 +297,17 @@ export async function POST(req: NextRequest) {
   const intendedSide = actionToSide(action);
 
   try {
+    // ── Daily trade limit ──────────────────────────────────────────────────
+    // Count trades opened today (ET). Limit is read from bot_settings so it
+    // can be changed without redeploying. Closes/exits are never blocked.
+    const MAX_DAILY_TRADES = 10;
+    const dailyCountRes = await query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM trades
+       WHERE opened_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
+         AND status    != 'CANCELED'`,
+    );
+    const todayCount = parseInt(dailyCountRes.rows[0]?.count ?? "0", 10);
+
     const openRes = await query<TradeRow>(
       `SELECT * FROM trades
        WHERE symbol = $1 AND status = 'OPEN'
@@ -305,6 +316,19 @@ export async function POST(req: NextRequest) {
       [symbol],
     );
     const openTrade = openRes.rows[0] ?? null;
+
+    // Block NEW opens when limit is reached — but always allow closes.
+    const isNewOpen = !(openTrade && openTrade.side !== intendedSide);
+    if (isNewOpen && todayCount >= MAX_DAILY_TRADES) {
+      return NextResponse.json(
+        {
+          ok: false,
+          blocked: true,
+          reason: `Daily trade limit reached (${todayCount}/${MAX_DAILY_TRADES}). Resets midnight ET.`,
+        },
+        { status: 429 },
+      );
+    }
 
     let trade: TradeRow;
     let resolution: "opened" | "closed";
@@ -411,7 +435,14 @@ export async function POST(req: NextRequest) {
     );
 
     return NextResponse.json(
-      { ok: true, resolution, trade, signal: signalRes.rows[0], traderspost: tpResult },
+      {
+        ok: true,
+        resolution,
+        trade,
+        signal: signalRes.rows[0],
+        traderspost: tpResult,
+        daily: { count: todayCount + (resolution === "opened" ? 1 : 0), limit: MAX_DAILY_TRADES },
+      },
       { status: 201 },
     );
   } catch (err) {
