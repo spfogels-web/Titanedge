@@ -115,8 +115,9 @@ function actionToSide(action: Action): TradeSide {
 }
 
 // ─── TradersPost forwarding ────────────────────────────────────────────────────
-// Fire-and-forget: log to TitanEdge DB first, then forward the same signal
-// to TradersPost so it executes the order at Tradovate.
+// Awaited (not fire-and-forget) so the fetch completes before we return our
+// response to TradingView. Returns a debug object so the caller can include
+// TradersPost's HTTP status in the JSON response — visible in test curl/PS output.
 // Set TRADERSPOST_WEBHOOK_URL in Railway env vars to enable.
 async function forwardToTradersPost(payload: {
   ticker: string;
@@ -126,9 +127,9 @@ async function forwardToTradersPost(payload: {
   price?: number | null;
   stopPrice?: number | null;
   takeProfit?: number | null;
-}): Promise<void> {
+}): Promise<{ skipped?: boolean; status?: number; ok?: boolean; body?: string; error?: string }> {
   const url = process.env.TRADERSPOST_WEBHOOK_URL;
-  if (!url) return; // not configured — skip silently
+  if (!url) return { skipped: true }; // not configured
 
   // Strip null/undefined before sending
   const body: Record<string, unknown> = {
@@ -137,19 +138,21 @@ async function forwardToTradersPost(payload: {
     sentiment: payload.sentiment,
     orderType: "market",
   };
-  if (payload.quantity  != null) body.quantity   = payload.quantity;
-  if (payload.price     != null) body.price       = payload.price;
-  if (payload.stopPrice != null) body.stopPrice   = payload.stopPrice;
-  if (payload.takeProfit != null) body.takeProfit = payload.takeProfit;
+  if (payload.quantity   != null) body.quantity   = payload.quantity;
+  if (payload.price      != null) body.price       = payload.price;
+  if (payload.stopPrice  != null) body.stopPrice   = payload.stopPrice;
+  if (payload.takeProfit != null) body.takeProfit  = payload.takeProfit;
 
   try {
-    await fetch(url, {
+    const res = await fetch(url, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify(body),
     });
-  } catch {
-    // Never fail the main request because TradersPost is unreachable
+    const text = await res.text();
+    return { status: res.status, ok: res.ok, body: text };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -265,6 +268,7 @@ export async function POST(req: NextRequest) {
 
     let trade: TradeRow;
     let resolution: "opened" | "closed";
+    let tpResult: Awaited<ReturnType<typeof forwardToTradersPost>> = { skipped: true };
 
     if (openTrade && openTrade.side !== intendedSide) {
       // Opposite-side alert → close the most recent open trade for this symbol
@@ -288,8 +292,8 @@ export async function POST(req: NextRequest) {
       trade = closeRes.rows[0];
       resolution = "closed";
 
-      // Forward exit to TradersPost
-      void forwardToTradersPost({
+      // Forward exit to TradersPost (awaited so it completes before response)
+      tpResult = await forwardToTradersPost({
         ticker:    symbol,
         action:    "exit",
         sentiment: "flat",
@@ -346,8 +350,8 @@ export async function POST(req: NextRequest) {
       trade = insertRes.rows[0];
       resolution = "opened";
 
-      // Forward entry to TradersPost
-      void forwardToTradersPost({
+      // Forward entry to TradersPost (awaited so it completes before response)
+      tpResult = await forwardToTradersPost({
         ticker:     symbol,
         action:     intendedSide === "LONG" ? "buy" : "sell",
         sentiment:  intendedSide === "LONG" ? "bullish" : "bearish",
@@ -367,7 +371,7 @@ export async function POST(req: NextRequest) {
     );
 
     return NextResponse.json(
-      { ok: true, resolution, trade, signal: signalRes.rows[0] },
+      { ok: true, resolution, trade, signal: signalRes.rows[0], traderspost: tpResult },
       { status: 201 },
     );
   } catch (err) {
