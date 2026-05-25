@@ -297,16 +297,26 @@ export async function POST(req: NextRequest) {
   const intendedSide = actionToSide(action);
 
   try {
-    // ── Daily trade limit ──────────────────────────────────────────────────
-    // Count trades opened today (ET). Limit is read from bot_settings so it
-    // can be changed without redeploying. Closes/exits are never blocked.
+    // ── Daily guards ───────────────────────────────────────────────────────
     const MAX_DAILY_TRADES = 10;
+    const MAX_DAILY_LOSS   = -900; // dollars — halt if realized PnL hits this
+
+    // Count trades opened today (ET)
     const dailyCountRes = await query<{ count: string }>(
       `SELECT COUNT(*) AS count FROM trades
        WHERE opened_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
          AND status    != 'CANCELED'`,
     );
     const todayCount = parseInt(dailyCountRes.rows[0]?.count ?? "0", 10);
+
+    // Sum realized PnL from trades closed today (ET)
+    const dailyPnlRes = await query<{ pnl: string }>(
+      `SELECT COALESCE(SUM(pnl), 0) AS pnl FROM trades
+       WHERE closed_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
+         AND status = 'CLOSED'
+         AND pnl IS NOT NULL`,
+    );
+    const todayPnl = parseFloat(dailyPnlRes.rows[0]?.pnl ?? "0");
 
     const openRes = await query<TradeRow>(
       `SELECT * FROM trades
@@ -317,7 +327,7 @@ export async function POST(req: NextRequest) {
     );
     const openTrade = openRes.rows[0] ?? null;
 
-    // Block NEW opens when limit is reached — but always allow closes.
+    // Block NEW opens when either guard is triggered — always allow closes.
     const isNewOpen = !(openTrade && openTrade.side !== intendedSide);
     if (isNewOpen && todayCount >= MAX_DAILY_TRADES) {
       return NextResponse.json(
@@ -325,6 +335,18 @@ export async function POST(req: NextRequest) {
           ok: false,
           blocked: true,
           reason: `Daily trade limit reached (${todayCount}/${MAX_DAILY_TRADES}). Resets midnight ET.`,
+          daily: { count: todayCount, limit: MAX_DAILY_TRADES, pnl: todayPnl, lossLimit: MAX_DAILY_LOSS },
+        },
+        { status: 429 },
+      );
+    }
+    if (isNewOpen && todayPnl <= MAX_DAILY_LOSS) {
+      return NextResponse.json(
+        {
+          ok: false,
+          blocked: true,
+          reason: `Daily loss limit hit ($${todayPnl.toFixed(2)} / $${MAX_DAILY_LOSS}). Resets midnight ET.`,
+          daily: { count: todayCount, limit: MAX_DAILY_TRADES, pnl: todayPnl, lossLimit: MAX_DAILY_LOSS },
         },
         { status: 429 },
       );
@@ -441,7 +463,12 @@ export async function POST(req: NextRequest) {
         trade,
         signal: signalRes.rows[0],
         traderspost: tpResult,
-        daily: { count: todayCount + (resolution === "opened" ? 1 : 0), limit: MAX_DAILY_TRADES },
+        daily: {
+          count: todayCount + (resolution === "opened" ? 1 : 0),
+          limit: MAX_DAILY_TRADES,
+          pnl: todayPnl,
+          lossLimit: MAX_DAILY_LOSS,
+        },
       },
       { status: 201 },
     );
