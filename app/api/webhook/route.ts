@@ -172,9 +172,10 @@ async function forwardToTradersPost(payload: {
     orderType: "market",
   };
   if (payload.quantity   != null) body.quantity   = payload.quantity;
-  if (payload.price      != null) body.price       = payload.price;
-  if (payload.stopPrice  != null) body.stopPrice   = payload.stopPrice;
-  if (payload.takeProfit != null) body.takeProfit  = payload.takeProfit;
+  if (payload.price      != null) body.price      = payload.price;
+  // TradersPost requires nested objects for stop/target with explicit sub-fields
+  if (payload.stopPrice  != null) body.stopLoss   = { stopPrice:  payload.stopPrice };
+  if (payload.takeProfit != null) body.takeProfit = { limitPrice: payload.takeProfit };
 
   try {
     const res = await fetch(url, {
