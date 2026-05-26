@@ -1,0 +1,772 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+// TITAN EDGE — MULTI STRATEGY v1
+// Strategies: Pivot Rejection · Dynamic Zones · ORB · VWAP Rejection · EMA Bounce
+// Exits:      One Shot Algo style trailing stop (breakeven → lock profits)
+// Routes to:  TitanEdge webhook → TradersPost → Tradovate
+// ═══════════════════════════════════════════════════════════════════════════
+strategy("⚡ TITAN EDGE - MULTI STRATEGY v1 ⚡", overlay=true,
+     default_qty_type  = strategy.fixed,
+     default_qty_value = 4,
+     initial_capital   = 50000,
+     commission_type   = strategy.commission.cash_per_contract,
+     commission_value  = 0.50,
+     calc_on_every_tick = false,
+     max_lines_count   = 500,
+     max_labels_count  = 100,
+     max_bars_back     = 500)
+
+// ───────────────────────────────────────────────
+// SETTINGS
+// ───────────────────────────────────────────────
+
+// ── Risk ────────────────────────────────────────
+atrPeriod    = input.int(14,    "ATR Period",           group="Risk")
+atrMultStop  = input.float(1.5, "Stop ATR Multiplier",  group="Risk")
+atrMultTP    = input.float(3.0, "Final TP ATR",         group="Risk")
+wickRatio    = input.float(0.50,"Wick Ratio",            group="Risk")
+sessionFilter= input.session("0930-1600", "RTH Session", group="Risk")
+maxTrades    = input.int(4,     "Max Trades / Day",      group="Risk")
+vixMax       = input.float(30.0,"VIX Max",               group="Risk")
+mag7Min      = input.int(4,     "Min Mag7 Bulls/Bears",  group="Risk")
+
+// ── Trailing Stop (One Shot Algo style) ─────────
+useTrailing = input.bool(true, "Enable Trailing Stop",    group="Trailing Stop")
+beAt1R      = input.bool(true, "Move to Breakeven at 1R", group="Trailing Stop")
+lockAt2R    = input.bool(true, "Lock 1R profit at 2R",    group="Trailing Stop")
+lockAt3R    = input.bool(true, "Lock 2R profit at 3R",    group="Trailing Stop")
+lockAt4R    = input.bool(true, "Lock 3R profit at 4R",    group="Trailing Stop")
+
+// ── Strategy Selectors ──────────────────────────
+usePivot   = input.bool(true, "Pivot Rejection",        group="Strategies")
+useZones   = input.bool(true, "Dynamic Zone Rejection",  group="Strategies")
+useORB     = input.bool(true, "Opening Range Breakout",  group="Strategies")
+useVWAPRej = input.bool(true, "VWAP Rejection",          group="Strategies")
+useEMABnce = input.bool(true, "EMA Bounce",              group="Strategies")
+
+// ── Filters ─────────────────────────────────────
+useVWAP  = input.bool(true,  "VWAP Filter",        group="Filters")
+useEMA   = input.bool(true,  "EMA Filter",          group="Filters")
+useMom   = input.bool(true,  "Momentum (RSI)",      group="Filters")
+useVol   = input.bool(true,  "Volume Filter",       group="Filters")
+useMag7  = input.bool(true,  "Mag7 Filter",         group="Filters")
+useVIX   = input.bool(true,  "VIX Filter",          group="Filters")
+useHTF   = input.bool(true,  "Higher TF Filter",    group="Filters")
+useCloud = input.bool(true,  "Trend Cloud Filter",   group="Filters")
+emaFast  = input.int(9,      "Fast EMA",             group="Filters")
+emaSlow  = input.int(21,     "Slow EMA",             group="Filters")
+volMult  = input.float(1.0,  "Volume Multiplier",    group="Filters")
+htfTF    = input.timeframe("60", "Higher Timeframe", group="Filters")
+
+// ── Pivot Settings ───────────────────────────────
+pivotTicks = input.int(12, "Pivot Touch Ticks", group="Pivot")
+minScore   = input.int(55, "Min Score",          group="Pivot")
+
+// ── ORB Settings ─────────────────────────────────
+orbMins       = input.int(30,    "ORB Minutes (from open)", group="ORB")
+orbVolMult    = input.float(1.3, "ORB Volume Multiplier",   group="ORB")
+orbTpMultiple = input.float(1.5, "ORB TP (× range)",        group="ORB")
+
+// ── VWAP Rejection ───────────────────────────────
+vwapTolAtr  = input.float(0.35, "VWAP Touch Tolerance (ATR)", group="VWAP Rejection")
+vwapVolMult = input.float(1.2,  "VWAP Volume Multiplier",      group="VWAP Rejection")
+
+// ── EMA Bounce ───────────────────────────────────
+emaTolAtr  = input.float(0.4, "EMA Touch Tolerance (ATR)", group="EMA Bounce")
+emaVolMult = input.float(1.0, "EMA Volume Multiplier",      group="EMA Bounce")
+
+// ── Dynamic Zones ────────────────────────────────
+useDynZones = input.bool(true, "Use Dynamic Zones",    group="Dynamic Zones")
+lookback    = input.int(200,   "Lookback Bars",         group="Dynamic Zones", minval=50,  maxval=500)
+minTouches  = input.int(4,     "Min Touches",           group="Dynamic Zones", minval=2,   maxval=10)
+touchTicks  = input.int(8,     "Touch Ticks",           group="Dynamic Zones", minval=2,   maxval=30)
+minBarsBetw = input.int(8,     "Min Bars Between",      group="Dynamic Zones", minval=1,   maxval=30)
+mergeTicks  = input.int(10,    "Merge Ticks",           group="Dynamic Zones", minval=2,   maxval=30)
+scanBars    = input.int(50,    "Scan Bars",             group="Dynamic Zones", minval=20,  maxval=200)
+zoneBonus   = input.int(20,    "Zone Score Bonus",      group="Dynamic Zones", minval=5,   maxval=40)
+premiumMin  = input.int(5,     "Premium Touch Min",     group="Dynamic Zones", minval=3,   maxval=15)
+
+// ── Trend Cloud ──────────────────────────────────
+showCloud   = input.bool(true,     "Show Cloud",   group="Cloud")
+cloudFast   = input.int(20,        "Fast Length",  group="Cloud", minval=2,  maxval=100)
+cloudSlow   = input.int(50,        "Slow Length",  group="Cloud", minval=10, maxval=200)
+cloudSmooth = input.int(3,         "Smoothing",    group="Cloud", minval=1,  maxval=20)
+cloudOpac   = input.int(75,        "Opacity",      group="Cloud", minval=50, maxval=95)
+cloudType   = input.string("Hull MA", "Type", options=["Hull MA","EMA","SMA","WMA"], group="Cloud")
+
+// ── Bookmap Pressure ─────────────────────────────
+showPressure = input.bool(true,  "Show Pressure Lines",  group="Bookmap")
+deltaThr     = input.float(1.5,  "Pressure Sensitivity", group="Bookmap", minval=0.5, maxval=5.0, step=0.1)
+lineExt      = input.int(30,     "Line Extension Bars",  group="Bookmap")
+maxLines     = input.int(60,     "Max Lines",            group="Bookmap")
+
+// ── Volume Profile ───────────────────────────────
+showVP   = input.bool(true, "Show Volume Profile", group="Volume Profile")
+vpLookbk = input.int(78,   "VP Lookback",          group="Volume Profile", minval=20,  maxval=500)
+vpBins   = input.int(40,   "VP Bins",              group="Volume Profile", minval=10,  maxval=80)
+vpWidth  = input.int(50,   "VP Width",             group="Volume Profile", minval=20,  maxval=200)
+vaArea   = input.float(70, "Value Area %",          group="Volume Profile", minval=50,  maxval=90)
+
+// ── Adaptive ────────────────────────────────────
+useAdapt  = input.bool(true, "Adaptive Threshold", group="Adaptive")
+adaptLook = input.int(20,    "Trades to Track",    group="Adaptive", minval=5, maxval=100)
+
+// ── Tradovate ───────────────────────────────────
+account = input.string("APEX6020720000001", "Account",   group="Tradovate")
+sym     = input.string("MNQM2026",        "Symbol",    group="Tradovate")
+qty     = input.int(4,                    "Contracts", group="Tradovate")
+
+// ───────────────────────────────────────────────
+// COLORS
+// ───────────────────────────────────────────────
+cGreen  = color.new(#00FF41, 0)
+cRed    = color.new(#FF0A0A, 0)
+cGray   = color.new(#888888, 0)
+cOrange = color.new(#FF6600, 0)
+cBlue   = color.new(#0099FF, 0)
+cPink   = color.new(#FF00FF, 0)
+cCyan   = color.new(#00FFFF, 0)
+cYellow = color.new(#FFFF00, 0)
+cZoneG  = color.new(#00FF41, 40)
+cZoneR  = color.new(#FF0A0A, 40)
+
+// ───────────────────────────────────────────────
+// CORE INDICATORS
+// ───────────────────────────────────────────────
+emaFastLine = ta.ema(close, emaFast)
+emaSlowLine = ta.ema(close, emaSlow)
+rsi         = ta.rsi(close, 14)
+atr         = ta.atr(atrPeriod)
+volAvg      = ta.sma(volume, 20)
+vwapVal     = ta.vwap(hlc3)
+
+// ── Trend Cloud ──────────────────────────────────
+f_ma(src, len, t) =>
+    switch t
+        "Hull MA" => ta.hma(src, len)
+        "EMA"     => ta.ema(src, len)
+        "SMA"     => ta.sma(src, len)
+        "WMA"     => ta.wma(src, len)
+        =>           ta.hma(src, len)
+
+cFast     = ta.ema(f_ma(close, cloudFast, cloudType), cloudSmooth)
+cSlow     = ta.ema(f_ma(close, cloudSlow, cloudType), cloudSmooth)
+cloudBull = cFast > cSlow
+cloudBear = cFast < cSlow
+
+fp = plot(showCloud ? cFast : na, "CF", color=color.new(cloudBull ? #00FF41 : #FF0A0A, 30), linewidth=2)
+sp = plot(showCloud ? cSlow : na, "CS", color=color.new(cloudBull ? #00AA2B : #AA0707, 50), linewidth=2)
+fill(fp, sp, color=cloudBull ? color.new(#00FF41, cloudOpac) : color.new(#FF0A0A, cloudOpac))
+
+// ── HTF ─────────────────────────────────────────
+htfFast = request.security(syminfo.tickerid, htfTF, ta.ema(close, 9))
+htfSlow = request.security(syminfo.tickerid, htfTF, ta.ema(close, 21))
+htfBull = htfFast > htfSlow
+htfBear = htfFast < htfSlow
+
+// ── Volume Delta / Bookmap ───────────────────────
+buyVol    = close >= open ? volume : 0
+sellVol   = close <  open ? volume : 0
+delta     = buyVol - sellVol
+dAvg      = ta.sma(math.abs(delta), 20)
+bigBuy    = delta >  dAvg * deltaThr
+bigSell   = delta < -(dAvg * deltaThr)
+intensity = dAvg > 0 ? math.min(4, math.max(1, math.round(math.abs(delta) / dAvg))) : 1
+
+var array<line> pLines = array.new<line>()
+if showPressure and (bigBuy or bigSell)
+    ln = line.new(bar_index, hlc3, bar_index + lineExt, hlc3,
+         color=bigBuy ? color.new(#00FF41, 60) : color.new(#FF0A0A, 60), width=intensity)
+    array.push(pLines, ln)
+    if array.size(pLines) > maxLines
+        line.delete(array.shift(pLines))
+
+// ── Mag7 / VIX ──────────────────────────────────
+aaplC = request.security("AAPL",  "D", close)
+aaplP = request.security("AAPL",  "D", close[1])
+msftC = request.security("MSFT",  "D", close)
+msftP = request.security("MSFT",  "D", close[1])
+nvdaC = request.security("NVDA",  "D", close)
+nvdaP = request.security("NVDA",  "D", close[1])
+amznC = request.security("AMZN",  "D", close)
+amznP = request.security("AMZN",  "D", close[1])
+googC = request.security("GOOGL", "D", close)
+googP = request.security("GOOGL", "D", close[1])
+metaC = request.security("META",  "D", close)
+metaP = request.security("META",  "D", close[1])
+tslaC = request.security("TSLA",  "D", close)
+tslaP = request.security("TSLA",  "D", close[1])
+
+mag7Bulls = (aaplC>aaplP?1:0)+(msftC>msftP?1:0)+(nvdaC>nvdaP?1:0)+(amznC>amznP?1:0)+(googC>googP?1:0)+(metaC>metaP?1:0)+(tslaC>tslaP?1:0)
+mag7Bears = 7 - mag7Bulls
+
+vixC  = request.security("VIX", "D", close)
+vixP  = request.security("VIX", "D", close[1])
+vixSafe = vixC < vixMax
+vixFall = vixC < vixP
+vixRise = vixC > vixP
+
+// ── Daily Pivots ─────────────────────────────────
+pH = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_on)
+pL = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_on)
+pC = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+PP = (pH + pL + pC) / 3
+R1 = (2 * PP) - pL
+R2 = PP + (pH - pL)
+R3 = pH + 2 * (PP - pL)
+S1 = (2 * PP) - pH
+S2 = PP - (pH - pL)
+S3 = pL - 2 * (pH - PP)
+
+plot(R3, "R3", color=color.new(#FF0A0A, 60), linewidth=1)
+plot(R2, "R2", color=cRed,  linewidth=2)
+plot(R1, "R1", color=cRed,  linewidth=2)
+plot(PP, "PP", color=cGray, linewidth=2)
+plot(S1, "S1", color=cGreen, linewidth=2)
+plot(S2, "S2", color=cGreen, linewidth=2)
+plot(S3, "S3", color=color.new(#00FF41, 60), linewidth=1)
+plot(pH, "PDH", color=cOrange, linewidth=2)
+plot(pL, "PDL", color=cBlue,   linewidth=2)
+plot(vwapVal, "VWAP", color=cPink, linewidth=2)
+
+// ───────────────────────────────────────────────
+// SESSION & DAILY COUNTER
+// ───────────────────────────────────────────────
+inSession = not na(time(timeframe.period, sessionFilter, "America/New_York"))
+bgcolor(inSession ? color.new(#0033FF, 96) : na, title="RTH Session")
+
+// ── EOD Force-Close (Apex eval: must be flat by 4 PM ET) ────────────────
+eodCloseSession = input.session("1555-1600", "EOD Force-Close Window", group="Risk")
+inEOD = not na(time(timeframe.period, eodCloseSession, "America/New_York"))
+eodCloseMsg = '{"action":"' + (strategy.position_size > 0 ? "SELL" : "BUY") + '","symbol":"' + sym + '","qty":' + str.tostring(math.abs(strategy.position_size)) + ',"orderType":"Market","account":"' + account + '","reason":"EOD-close"}'
+if inEOD and strategy.position_size != 0
+    strategy.close_all(comment="EOD Close", alert_message=eodCloseMsg)
+
+var int tradesToday = 0
+isNewDay = ta.change(time("D")) != 0
+if isNewDay
+    tradesToday := 0
+
+// ───────────────────────────────────────────────
+// CANDLE PATTERNS
+// ───────────────────────────────────────────────
+rng      = high - low
+lowWick  = math.min(open, close) - low
+highWick = high - math.max(open, close)
+body     = math.abs(close - open)
+bullHammer = rng > 0 and (lowWick  / rng >= wickRatio) and (highWick < body) and close > open
+bearStar   = rng > 0 and (highWick / rng >= wickRatio) and (lowWick  < body) and close < open
+bullEngulf = close > open[1] and open < close[1] and close > close[1] and body > body[1]
+bearEngulf = close < open[1] and open > close[1] and close < close[1] and body > body[1]
+bullCandle = bullHammer or bullEngulf
+bearCandle = bearStar   or bearEngulf
+
+// ───────────────────────────────────────────────
+// OPENING RANGE BREAKOUT (ORB)
+// ───────────────────────────────────────────────
+orbEndMinutes = 930 + orbMins
+orbSessionStr = "0930-" + str.tostring(math.floor(orbEndMinutes / 60), "00") + str.tostring(orbEndMinutes - math.floor(orbEndMinutes / 60) * 60, "00")
+inORB = not na(time(timeframe.period, orbSessionStr, "America/New_York"))
+
+var float orbHigh = na
+var float orbLow  = na
+var bool  orbSet  = false
+
+if isNewDay
+    orbHigh := na
+    orbLow  := na
+    orbSet  := false
+
+if inORB
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow  := na(orbLow)  ? low  : math.min(orbLow,  low)
+
+if not inORB and not na(orbHigh) and not orbSet
+    orbSet := true
+
+orbRange     = orbSet ? orbHigh - orbLow : na
+orbLongStop  = orbSet ? orbLow  - (atr * 0.5) : na
+orbShortStop = orbSet ? orbHigh + (atr * 0.5) : na
+orbLongTP    = orbSet ? orbHigh + (orbRange * orbTpMultiple) : na
+orbShortTP   = orbSet ? orbLow  - (orbRange * orbTpMultiple) : na
+
+var line orbHighLine = na
+var line orbLowLine  = na
+if orbSet and barstate.islast
+    line.delete(orbHighLine)
+    line.delete(orbLowLine)
+    orbHighLine := line.new(bar_index - 50, orbHigh, bar_index + 20, orbHigh, color=color.new(cYellow, 20), width=2, style=line.style_dashed)
+    orbLowLine  := line.new(bar_index - 50, orbLow,  bar_index + 20, orbLow,  color=color.new(cYellow, 20), width=2, style=line.style_dashed)
+
+orbBullBreak = useORB and orbSet and inSession and not inORB and close > orbHigh and close[1] <= orbHigh and volume > volAvg * orbVolMult
+orbBearBreak = useORB and orbSet and inSession and not inORB and close < orbLow  and close[1] >= orbLow  and volume > volAvg * orbVolMult
+
+// ───────────────────────────────────────────────
+// VWAP REJECTION
+// ───────────────────────────────────────────────
+vwapTol      = atr * vwapTolAtr
+nearVWAP     = math.abs(low - vwapVal) < vwapTol or math.abs(high - vwapVal) < vwapTol or math.abs(close - vwapVal) < vwapTol
+vwapRejLong  = useVWAPRej and inSession and nearVWAP and close > vwapVal and bullCandle and cloudBull and htfBull and volume > volAvg * vwapVolMult
+vwapRejShort = useVWAPRej and inSession and nearVWAP and close < vwapVal and bearCandle and cloudBear and htfBear and volume > volAvg * vwapVolMult
+
+// ───────────────────────────────────────────────
+// EMA BOUNCE
+// ───────────────────────────────────────────────
+emaTol      = atr * emaTolAtr
+nearEMA21   = math.abs(low - emaSlowLine) < emaTol or math.abs(high - emaSlowLine) < emaTol
+emaBncLong  = useEMABnce and inSession and nearEMA21 and close > emaSlowLine and bullCandle and cloudBull and htfBull and rsi > 40 and rsi < 65 and volume > volAvg * emaVolMult
+emaBncShort = useEMABnce and inSession and nearEMA21 and close < emaSlowLine and bearCandle and cloudBear and htfBear and rsi > 35 and rsi < 60 and volume > volAvg * emaVolMult
+
+// ───────────────────────────────────────────────
+// DYNAMIC TOUCH ZONES
+// ───────────────────────────────────────────────
+var array<float> zPrices  = array.new<float>()
+var array<int>   zTouches = array.new<int>()
+var array<int>   zLastBar = array.new<int>()
+var array<bool>  zIsSupp  = array.new<bool>()
+var array<line>  zLines   = array.new<line>()
+var array<label> zLabels  = array.new<label>()
+
+var bool  atSupp     = false
+var bool  atRes      = false
+var bool  atPremSupp = false
+var bool  atPremRes  = false
+var float nearSupp   = na
+var float nearRes    = na
+
+if barstate.islast and useDynZones
+    while array.size(zLines) > 0
+        line.delete(array.pop(zLines))
+    while array.size(zLabels) > 0
+        label.delete(array.pop(zLabels))
+    array.clear(zPrices)
+    array.clear(zTouches)
+    array.clear(zLastBar)
+    array.clear(zIsSupp)
+
+    tol     = touchTicks * syminfo.mintick
+    mTol    = mergeTicks * syminfo.mintick
+    cPrices = array.new<float>()
+
+    sLen = math.min(scanBars, bar_index)
+    if sLen > 4
+        for i = 2 to sLen - 2
+            if high[i] > high[i+1] and high[i] > high[i+2] and high[i] > high[i-1] and high[i] > high[i-2]
+                array.push(cPrices, high[i])
+            if low[i] < low[i+1] and low[i] < low[i+2] and low[i] < low[i-1] and low[i] < low[i-2]
+                array.push(cPrices, low[i])
+
+    lLen = math.min(lookback, bar_index)
+    if array.size(cPrices) > 0 and lLen > 0
+        for c = 0 to array.size(cPrices) - 1
+            cp = array.get(cPrices, c)
+            tc = 0
+            lb = -9999
+            for j = 0 to lLen - 1
+                touched = math.abs(high[j]-cp) <= tol or math.abs(low[j]-cp) <= tol or math.abs(close[j]-cp) <= tol
+                if touched
+                    bn = bar_index - j
+                    if bn - lb >= minBarsBetw
+                        tc += 1
+                        lb := bn
+            if tc >= minTouches
+                merged = false
+                nZP = array.size(zPrices)
+                for z = 0 to nZP > 0 ? nZP - 1 : -1
+                    ep = array.get(zPrices, z)
+                    if math.abs(ep - cp) <= mTol
+                        et = array.get(zTouches, z)
+                        array.set(zPrices,  z, (ep*et + cp*tc) / (et+tc))
+                        array.set(zTouches, z, math.max(et, tc))
+                        array.set(zLastBar, z, math.max(array.get(zLastBar, z), lb))
+                        merged := true
+                        break
+                if not merged
+                    array.push(zPrices,  cp)
+                    array.push(zTouches, tc)
+                    array.push(zLastBar, lb)
+                    array.push(zIsSupp,  cp < close)
+
+    nearSupp := na
+    nearRes  := na
+    nSD = 1e10
+    nRD = 1e10
+    if array.size(zPrices) > 0
+        for z = 0 to array.size(zPrices) - 1
+            zp  = array.get(zPrices,  z)
+            zt  = array.get(zTouches, z)
+            zl  = array.get(zLastBar, z)
+            isS = zp < close
+            array.set(zIsSupp, z, isS)
+            ip  = zt >= premiumMin
+            zc  = isS ? (ip ? color.new(#00FF41, 10) : cZoneG) : (ip ? color.new(#FF0A0A, 10) : cZoneR)
+            ln  = line.new(zl-50, zp, bar_index+30, zp, color=zc, width=ip?4:2, style=line.style_solid, extend=extend.right)
+            array.push(zLines, ln)
+            tx  = (ip ? "★ STRONG " : "") + (isS ? "Supp " : "Res ") + str.tostring(zt) + "x"
+            lb_ = label.new(bar_index+30, zp, tx, color=color.new(color.black,20), textcolor=isS?cGreen:cRed, style=label.style_label_left, size=ip?size.normal:size.small)
+            array.push(zLabels, lb_)
+            d = math.abs(zp - close)
+            if isS and d < nSD
+                nSD      := d
+                nearSupp := zp
+            if not isS and d < nRD
+                nRD     := d
+                nearRes := zp
+
+if useDynZones and array.size(zPrices) > 0
+    nt = touchTicks * syminfo.mintick
+    atSupp     := false
+    atRes      := false
+    atPremSupp := false
+    atPremRes  := false
+    for z = 0 to array.size(zPrices) - 1
+        zp  = array.get(zPrices,  z)
+        zt  = array.get(zTouches, z)
+        isS = array.get(zIsSupp,  z)
+        ip  = zt >= premiumMin
+        nr  = math.abs(low-zp) <= nt or math.abs(close-zp) <= nt
+        if nr
+            if isS
+                atSupp := true
+                if ip
+                    atPremSupp := true
+            else
+                atRes := true
+                if ip
+                    atPremRes := true
+else
+    atSupp     := false
+    atRes      := false
+    atPremSupp := false
+    atPremRes  := false
+
+// ───────────────────────────────────────────────
+// VOLUME PROFILE
+// ───────────────────────────────────────────────
+var array<line> vpLns = array.new<line>()
+var line  pocLn = na
+var line  vahLn = na
+var line  valLn = na
+var float pocP  = na
+
+if barstate.islast and showVP
+    while array.size(vpLns) > 0
+        line.delete(array.pop(vpLns))
+    line.delete(pocLn)
+    line.delete(vahLn)
+    line.delete(valLn)
+
+    vpH = ta.highest(high, vpLookbk)
+    vpL = ta.lowest(low,   vpLookbk)
+    bs  = (vpH - vpL) / vpBins
+    if bs > 0
+        bins = array.new<float>(vpBins, 0.0)
+        for i = 0 to vpLookbk - 1
+            idx = math.max(0, math.min(vpBins-1, math.floor(((high[i]+low[i])/2 - vpL) / bs)))
+            array.set(bins, idx, array.get(bins, idx) + volume[i])
+        mv  = 0.0
+        pi  = 0
+        tv  = 0.0
+        for i = 0 to vpBins - 1
+            v = array.get(bins, i)
+            tv += v
+            if v > mv
+                mv := v
+                pi := i
+        av  = array.get(bins, pi)
+        ui  = pi
+        di  = pi
+        tgt = tv * vaArea / 100
+        while av < tgt and (ui < vpBins-1 or di > 0)
+            uv = ui < vpBins-1 ? array.get(bins, ui+1) : 0.0
+            dv = di > 0        ? array.get(bins, di-1) : 0.0
+            if uv >= dv and ui < vpBins-1
+                ui += 1
+                av += uv
+            else if di > 0
+                di -= 1
+                av += dv
+            else
+                break
+        pocP := vpL + pi*bs + bs/2
+        vahP  = vpL + ui*bs + bs/2
+        valP  = vpL + di*bs + bs/2
+        bx    = bar_index + 5
+        for i = 0 to vpBins - 1
+            v     = array.get(bins, i)
+            r     = mv > 0 ? v/mv : 0.0
+            pl    = vpL + i*bs + bs/2
+            inVA  = i >= di and i <= ui
+            isHVN = r >= 0.7
+            col   = i == pi ? cYellow : isHVN ? color.new(cCyan,30) : inVA ? color.new(cCyan,70) : color.new(cGray,75)
+            ln    = line.new(bx, pl, bx + math.round(vpWidth*r), pl, color=col, width=2)
+            array.push(vpLns, ln)
+        pocLn := line.new(bar_index-vpLookbk, pocP, bar_index+vpWidth+10, pocP, color=cYellow,               width=2, style=line.style_dashed)
+        vahLn := line.new(bar_index-vpLookbk, vahP, bar_index+vpWidth+10, vahP, color=color.new(cCyan,30),   width=1, style=line.style_dotted)
+        valLn := line.new(bar_index-vpLookbk, valP, bar_index+vpWidth+10, valP, color=color.new(cCyan,30),   width=1, style=line.style_dotted)
+
+// ───────────────────────────────────────────────
+// PIVOT REJECTION FILTERS & SCORE
+// ───────────────────────────────────────────────
+tSz   = syminfo.mintick
+tZone = pivotTicks * tSz
+nearPivotSupp = math.abs(low-PP)<tZone or math.abs(low-S1)<tZone or math.abs(low-S2)<tZone or math.abs(low-S3)<tZone or math.abs(low-pL)<tZone
+nearPivotRes  = math.abs(high-PP)<tZone or math.abs(high-R1)<tZone or math.abs(high-R2)<tZone or math.abs(high-R3)<tZone or math.abs(high-pH)<tZone
+
+fVwapL = not useVWAP  or close > vwapVal
+fVwapS = not useVWAP  or close < vwapVal
+fEmaL  = not useEMA   or emaFastLine > emaSlowLine
+fEmaS  = not useEMA   or emaFastLine < emaSlowLine
+fRsiL  = not useMom   or (rsi > 40 and rsi < 75)
+fRsiS  = not useMom   or (rsi < 60 and rsi > 25)
+fVolL  = not useVol   or volume > volAvg * volMult
+fVolS  = not useVol   or volume > volAvg * volMult
+fM7L   = not useMag7  or mag7Bulls >= mag7Min
+fM7S   = not useMag7  or mag7Bears >= mag7Min
+fVixL  = not useVIX   or (vixSafe and vixFall)
+fVixS  = not useVIX   or (vixSafe and vixRise)
+fHtfL  = not useHTF   or htfBull
+fHtfS  = not useHTF   or htfBear
+fCldL  = not useCloud or cloudBull
+fCldS  = not useCloud or cloudBear
+
+pbL = atPremSupp and bullCandle ? 10 : 0
+pbS = atPremRes  and bearCandle ? 10 : 0
+
+longScore  = (nearPivotSupp?20:0)+(bullCandle?15:0)+(fVwapL?10:0)+(fEmaL?10:0)+(fRsiL?10:0)+(fVolL?10:0)+(fM7L?15:0)+(fVixL?10:0)+(atSupp and bullCandle?zoneBonus:0)+pbL+(fCldL?10:0)
+shortScore = (nearPivotRes ?20:0)+(bearCandle?15:0)+(fVwapS?10:0)+(fEmaS?10:0)+(fRsiS?10:0)+(fVolS?10:0)+(fM7S?15:0)+(fVixS?10:0)+(atRes  and bearCandle?zoneBonus:0)+pbS+(fCldS?10:0)
+
+// ── Adaptive Threshold ───────────────────────────
+var array<float> tResults = array.new<float>()
+if strategy.closedtrades > nz(strategy.closedtrades[1])
+    array.push(tResults, strategy.closedtrades.profit(strategy.closedtrades - 1))
+    if array.size(tResults) > adaptLook
+        array.shift(tResults)
+
+wins   = 0
+totPnL = 0.0
+nT     = array.size(tResults)
+if nT > 0
+    for i = 0 to nT - 1
+        r = array.get(tResults, i)
+        if r > 0
+            wins += 1
+        totPnL += r
+
+winRate = nT > 0 ? wins / nT * 100 : 50.0
+effMin  = minScore
+if useAdapt and nT >= 5
+    if winRate >= 65
+        effMin := math.max(45, minScore - 10)
+    else if winRate >= 55
+        effMin := math.max(50, minScore - 5)
+    else if winRate < 35
+        effMin := math.min(85, minScore + 15)
+    else if winRate < 45
+        effMin := math.min(80, minScore + 10)
+
+// ───────────────────────────────────────────────
+// ENTRY CONDITIONS
+// ───────────────────────────────────────────────
+canTrade = inSession and tradesToday < maxTrades and strategy.position_size == 0
+
+// 1. Pivot Rejection
+pivLong  = usePivot and canTrade and longScore  >= effMin
+pivShort = usePivot and canTrade and shortScore >= effMin
+
+// 2. Dynamic Zone Rejection
+zoneLong  = useZones and canTrade and atSupp and bullCandle and fVixL and fM7L and fHtfL and fCldL
+zoneShort = useZones and canTrade and atRes  and bearCandle and fVixS and fM7S and fHtfS and fCldS
+
+// 3. ORB Breakout
+orbLong  = orbBullBreak and canTrade and fCldL and fHtfL and fM7L
+orbShort = orbBearBreak and canTrade and fCldS and fHtfS and fM7S
+
+// 4. VWAP Rejection
+vwapLong  = vwapRejLong  and canTrade
+vwapShort = vwapRejShort and canTrade
+
+// 5. EMA Bounce
+emaLong  = emaBncLong  and canTrade
+emaShort = emaBncShort and canTrade
+
+// ── Combined ─────────────────────────────────────
+longCond  = pivLong  or zoneLong  or orbLong  or vwapLong  or emaLong
+shortCond = pivShort or zoneShort or orbShort or vwapShort or emaShort
+
+stratTag = orbLong or orbShort ? "ORB" : vwapLong or vwapShort ? "VWAP Rej" : emaLong or emaShort ? "EMA Bounce" : zoneLong or zoneShort ? "Zone Rej" : "Pivot Rej"
+scoreTag = longCond ? longScore : shortScore
+
+// ───────────────────────────────────────────────
+// STOP & TARGET LEVELS
+// ───────────────────────────────────────────────
+oneR = atr * atrMultStop
+
+longStop  = (orbLong  and not pivLong  and not zoneLong  and not vwapLong  and not emaLong)  ? orbLongStop  : close - oneR
+shortStop = (orbShort and not pivShort and not zoneShort and not vwapShort and not emaShort) ? orbShortStop : close + oneR
+longTP    = (orbLong  and not pivLong  and not zoneLong  and not vwapLong  and not emaLong)  ? orbLongTP    : close + (atr * atrMultTP)
+shortTP   = (orbShort and not pivShort and not zoneShort and not vwapShort and not emaShort) ? orbShortTP   : close - (atr * atrMultTP)
+
+halfQty = math.max(1, math.floor(qty / 2))
+
+// ───────────────────────────────────────────────
+// ONE SHOT ALGO — TRAILING STOP
+// ───────────────────────────────────────────────
+var float entryLong  = na
+var float entryShort = na
+var float stopLong   = na
+var float stopShort  = na
+var float rLong      = na
+var float rShort     = na
+
+if strategy.position_size == 0
+    entryLong  := na
+    entryShort := na
+    stopLong   := na
+    stopShort  := na
+    rLong      := na
+    rShort     := na
+
+if longCond and strategy.position_size == 0
+    entryLong := close
+    stopLong  := longStop
+    rLong     := close - longStop
+
+if shortCond and strategy.position_size == 0
+    entryShort := close
+    stopShort  := shortStop
+    rShort     := shortStop - close
+
+if strategy.position_size > 0 and not na(entryLong) and useTrailing
+    profit  = close - entryLong
+    newStop = lockAt4R and profit >= rLong * 4 ? entryLong + rLong * 3 :
+              lockAt3R and profit >= rLong * 3 ? entryLong + rLong * 2 :
+              lockAt2R and profit >= rLong * 2 ? entryLong + rLong      :
+              beAt1R   and profit >= rLong     ? entryLong              :
+                                                 entryLong - rLong
+    stopLong := math.max(nz(stopLong, entryLong - rLong), newStop)
+
+if strategy.position_size < 0 and not na(entryShort) and useTrailing
+    profit  = entryShort - close
+    newStop = lockAt4R and profit >= rShort * 4 ? entryShort - rShort * 3 :
+              lockAt3R and profit >= rShort * 3 ? entryShort - rShort * 2 :
+              lockAt2R and profit >= rShort * 2 ? entryShort - rShort      :
+              beAt1R   and profit >= rShort     ? entryShort               :
+                                                  entryShort + rShort
+    stopShort := math.min(nz(stopShort, entryShort + rShort), newStop)
+
+exitLongMsg  = '{"action":"SELL","symbol":"' + sym + '","qty":' + str.tostring(qty) + ',"orderType":"Market","account":"' + account + '","reason":"exit"}'
+exitShortMsg = '{"action":"BUY","symbol":"'  + sym + '","qty":' + str.tostring(qty) + ',"orderType":"Market","account":"' + account + '","reason":"exit"}'
+
+if strategy.position_size > 0 and not na(stopLong)
+    strategy.exit("Trail Long",  "Long",  stop=stopLong,  limit=longTP,  alert_message=exitLongMsg)
+if strategy.position_size < 0 and not na(stopShort)
+    strategy.exit("Trail Short", "Short", stop=stopShort, limit=shortTP, alert_message=exitShortMsg)
+
+// ───────────────────────────────────────────────
+// ENTRIES
+// ───────────────────────────────────────────────
+if longCond
+    lMsg = '{"action":"BUY","symbol":"'   + sym                            +
+           '","qty":'                      + str.tostring(qty)              +
+           ',"price":'                     + str.tostring(close,     "#.##")+
+           ',"stop_price":'               + str.tostring(longStop,  "#.##")+
+           ',"target_price":'             + str.tostring(longTP,    "#.##")+
+           ',"orderType":"Market","account":"' + account                   +
+           '","score":'                    + str.tostring(scoreTag)         +
+           ',"strategy":"'                + stratTag + '"}'
+    strategy.entry("Long", strategy.long, qty=qty, alert_message=lMsg)
+    tradesToday += 1
+
+if shortCond
+    sMsg = '{"action":"SELL","symbol":"'  + sym                            +
+           '","qty":'                      + str.tostring(qty)              +
+           ',"price":'                     + str.tostring(close,     "#.##")+
+           ',"stop_price":'               + str.tostring(shortStop, "#.##")+
+           ',"target_price":'             + str.tostring(shortTP,   "#.##")+
+           ',"orderType":"Market","account":"' + account                   +
+           '","score":'                    + str.tostring(scoreTag)         +
+           ',"strategy":"'                + stratTag + '"}'
+    strategy.entry("Short", strategy.short, qty=qty, alert_message=sMsg)
+    tradesToday += 1
+
+// ───────────────────────────────────────────────
+// BUY / SELL SIGNAL ARROWS + LABELS
+// ───────────────────────────────────────────────
+plotshape(longCond,  "▲ BUY",      shape.triangleup,   location.belowbar, cGreen,  size=size.large)
+plotshape(shortCond, "▼ SELL",     shape.triangledown, location.abovebar, cRed,    size=size.large)
+plotshape(orbLong,   "ORB Long",   shape.circle,       location.belowbar, cYellow, size=size.small)
+plotshape(orbShort,  "ORB Short",  shape.circle,       location.abovebar, cYellow, size=size.small)
+plotshape(vwapLong,  "VWAP Long",  shape.diamond,      location.belowbar, cCyan,   size=size.small)
+plotshape(vwapShort, "VWAP Short", shape.diamond,      location.abovebar, cCyan,   size=size.small)
+plotshape(emaLong,   "EMA Long",   shape.square,       location.belowbar, cBlue,   size=size.tiny)
+plotshape(emaShort,  "EMA Short",  shape.square,       location.abovebar, cBlue,   size=size.tiny)
+
+if longCond
+    lTag = "BUY\n" + stratTag + "\n" + str.tostring(close, "#.##")
+    label.new(bar_index, low - atr * 1.5, lTag,
+         color=color.new(#00FF41, 10), textcolor=color.white,
+         style=label.style_label_up, size=size.normal)
+
+if shortCond
+    sTag = "SELL\n" + stratTag + "\n" + str.tostring(close, "#.##")
+    label.new(bar_index, high + atr * 1.5, sTag,
+         color=color.new(#FF0A0A, 10), textcolor=color.white,
+         style=label.style_label_down, size=size.normal)
+
+plot(strategy.position_size > 0 and not na(stopLong)  ? stopLong  : na, "Trail Stop L", color=cOrange,              linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size < 0 and not na(stopShort) ? stopShort : na, "Trail Stop S", color=cOrange,              linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size > 0 and not na(longTP)    ? longTP    : na, "TP Long",      color=color.new(cGreen, 40), linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size < 0 and not na(shortTP)   ? shortTP   : na, "TP Short",     color=color.new(cRed,   40), linewidth=1, style=plot.style_linebr)
+
+// ───────────────────────────────────────────────
+// STATUS TABLE
+// ───────────────────────────────────────────────
+var table tbl = table.new(position.top_right, 2, 16, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.gray,50))
+if barstate.islast
+    wrC  = winRate >= 55 ? cGreen  : winRate >= 45 ? cYellow : cRed
+    pnlC = totPnL  >= 0  ? cGreen  : cRed
+    clC  = cloudBull     ? cGreen  : cRed
+    clT  = cloudBull     ? "▲ BULL": "▼ BEAR"
+    posC = strategy.position_size > 0 ? cGreen : strategy.position_size < 0 ? cRed : cGray
+    posT = strategy.position_size > 0 ? "LONG"  : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    trl  = strategy.position_size > 0 and not na(stopLong)  ? str.tostring(stopLong,  "#.##") :
+           strategy.position_size < 0 and not na(stopShort) ? str.tostring(stopShort, "#.##") : "—"
+
+    table.cell(tbl, 0, 0,  "TITAN EDGE",   text_color=cYellow, bgcolor=color.new(color.black,30), text_size=size.small)
+    table.cell(tbl, 1, 0,  "MULTI v1",     text_color=cCyan,   bgcolor=color.new(color.black,30), text_size=size.small)
+    table.cell(tbl, 0, 1,  "Position",     text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 1,  posT,           text_color=posC,        text_size=size.small)
+    table.cell(tbl, 0, 2,  "Trail Stop",   text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 2,  trl,            text_color=cOrange,     text_size=size.small)
+    table.cell(tbl, 0, 3,  "Cloud",        text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 3,  clT,            text_color=clC,         text_size=size.small)
+    table.cell(tbl, 0, 4,  "Win Rate",     text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 4,  str.tostring(winRate, "#.#") + "%", text_color=wrC, text_size=size.small)
+    table.cell(tbl, 0, 5,  "Threshold",    text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 5,  str.tostring(effMin) + (effMin < minScore ? " ▼" : effMin > minScore ? " ▲" : " ="), text_color=cCyan, text_size=size.small)
+    table.cell(tbl, 0, 6,  "Trades Today", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 6,  str.tostring(tradesToday) + "/" + str.tostring(maxTrades), text_color=tradesToday >= maxTrades ? cRed : color.white, text_size=size.small)
+    table.cell(tbl, 0, 7,  "P&L (session)",text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 7,  "$" + str.tostring(totPnL, "#.##"), text_color=pnlC, text_size=size.small)
+    table.cell(tbl, 0, 8,  "ORB High",     text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 8,  na(orbHigh) ? "—" : str.tostring(orbHigh, "#.##"), text_color=cYellow, text_size=size.small)
+    table.cell(tbl, 0, 9,  "ORB Low",      text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 9,  na(orbLow)  ? "—" : str.tostring(orbLow,  "#.##"), text_color=cYellow, text_size=size.small)
+    table.cell(tbl, 0, 10, "POC",          text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 10, na(pocP)    ? "—" : str.tostring(pocP,    "#.##"), text_color=cYellow, text_size=size.small)
+    table.cell(tbl, 0, 11, "Zones",        text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 11, str.tostring(array.size(zPrices)), text_color=cCyan, text_size=size.small)
+    table.cell(tbl, 0, 12, "Long / Short", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 12, str.tostring(longScore) + " / " + str.tostring(shortScore), text_color=cCyan, text_size=size.small)
+    table.cell(tbl, 0, 13, "At Zone",      text_color=color.white, text_size=size.small)
+    zT = atPremSupp ? "★ PREM SUPP" : atPremRes ? "★ PREM RES" : atSupp ? "support" : atRes ? "resistance" : "no"
+    zC = atPremSupp ? cYellow : atPremRes ? cYellow : atSupp ? cGreen : atRes ? cRed : cGray
+    table.cell(tbl, 1, 13, zT, text_color=zC, text_size=size.small)
+    table.cell(tbl, 0, 14, "VWAP",         text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 14, str.tostring(vwapVal, "#.##"), text_color=cPink, text_size=size.small)
+    table.cell(tbl, 0, 15, "HTF Bias",     text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 15, htfBull ? "▲ BULL" : "▼ BEAR", text_color=htfBull ? cGreen : cRed, text_size=size.small)
+
+// NOTE: alertcondition() has no effect in strategy scripts.
+// Alerts fire via strategy.entry(..., alert_message=...) above.

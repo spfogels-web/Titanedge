@@ -300,8 +300,8 @@ export async function POST(req: NextRequest) {
 
   try {
     // ── Daily guards ───────────────────────────────────────────────────────
-    const MAX_DAILY_TRADES = 10;
-    const MAX_DAILY_LOSS   = -900; // dollars — halt if realized PnL hits this
+    const MAX_DAILY_TRADES = 4;
+    const MAX_DAILY_LOSS   = -800; // dollars — Apex $50K eval daily limit is ~$1000, stop at $800 to be safe
 
     // Count trades opened today (ET)
     const dailyCountRes = await query<{ count: string }>(
