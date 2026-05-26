@@ -164,13 +164,14 @@ async function forwardToTradersPost(payload: {
   const url = await getSetting("TRADERSPOST_WEBHOOK_URL");
   if (!url) return { skipped: true }; // not configured
 
-  // Strip null/undefined before sending
+  // Strip null/undefined before sending.
+  // TradersPost rejects sentiment on exit actions.
   const body: Record<string, unknown> = {
     ticker:    payload.ticker,
     action:    payload.action,
-    sentiment: payload.sentiment,
     orderType: "market",
   };
+  if (payload.action !== "exit") body.sentiment = payload.sentiment;
   if (payload.quantity   != null) body.quantity   = payload.quantity;
   if (payload.price      != null) body.price      = payload.price;
   // TradersPost requires nested objects for stop/target with explicit sub-fields
