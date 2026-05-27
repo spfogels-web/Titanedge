@@ -63,7 +63,7 @@ export async function POST() {
 
     // ── seed TradersPost URL ─────────────────────────────────────────────────
     const tpUrl = process.env.TRADERSPOST_WEBHOOK_URL ??
-      "https://webhooks.traderspost.io/trading/webhook/1a7a3b0b-6362-4e2c-8edb-28a066587d91/f042aae5e564b42ba41c3eae9e4492b8";
+      "https://webhooks.traderspost.io/trading/webhook/8970d3ec-b6e3-4f08-a4f7-b7aaa1fd8be6/97b086bc87bc77fd4a2fa8bf86a5fd1d";
 
     await query(`
       INSERT INTO bot_settings (key, value)
